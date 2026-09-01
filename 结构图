@@ -1,0 +1,103 @@
+                    config.py
+                       │
+             ┌─────────┴─────────┐
+             ↓                   ↓
+      patient STL           implant STL
+             │                   │
+             └─────────┬─────────┘
+                       ↓
+                preprocessing.py
+                       │
+        ┌──────────────┼──────────────┐
+        ↓              ↓              ↓
+ mesh_utils.py   voxel_utils.py   centerline.py
+        │              │              │
+        │              │              │
+        └──────────────┼──────────────┘
+                       ↓
+             mesh_reconstruction.py
+                       │
+                       ↓
+                 processed STL
+                       │
+                       ↓
+              visualization.py
+                       │
+                       ↓
+                 中心线检查
+                       │
+                       ↓
+                 comparison.py
+                       │
+              ┌────────┴────────┐
+              ↓                 ↓
+           RMSE             曲率比较
+
+
+模块                     负责内容
+rib_shape_compare.py	主程序、流程控制
+config.py           	路径、参数、开关
+preprocessing.py    	预处理总流程
+mesh_utils.py	        STL读取、清理、连通组件、尺寸等
+voxel_utils.py	        体素化、填充、闭运算、体素清理
+centerline.py	        3D Skeleton、最长路径、中心线、平滑、重采样
+mesh_reconstruction.py	Marching Cubes、Taubin、减面、重新生成STL
+visualization.py	    中心线检查、配准前后显示、STL重叠显示
+registration.py	        三轴旋转 + XYZ平移自动配准
+comparison.py	        RMSE、曲率、相似性比较
+
+
+迭代后：
+
+                    config.py
+                       │
+             ┌─────────┴─────────┐
+             ↓                   ↓
+       患者原始 STL          人工肋骨原始 STL
+             │                   │
+             │              尺寸 ×45.4545
+             │                   │
+             └─────────┬─────────┘
+                       ↓
+                preprocessing.py
+                       │
+             ┌─────────┴─────────┐
+             ↓                   ↓
+        mesh_utils.py       voxel_utils.py
+                                 │
+                                 ↓
+                           体素模型清理
+                                 │
+                                 ↓
+                           centerline.py
+                                 │
+                          3D Skeleton
+                                 │
+                          最长骨架路径
+                                 │
+                          平滑 + 重采样
+                                 │
+                   ┌─────────────┴─────────────┐
+                   ↓                           ↓
+             患者中心线                  人工骨中心线
+                   │                           │
+                   └─────────────┬─────────────┘
+                                 ↓
+                         registration.py
+                                 │
+                    三轴旋转 + 平移自动配准
+                                 │
+                  ┌──────────────┴──────────────┐
+                  ↓                             ↓
+             中心线配准                    STL模型配准
+                  │                             │
+                  └──────────────┬──────────────┘
+                                 ↓
+                         visualization.py
+                                 │
+                    配准前 / 配准后可视化
+                                 │
+                                 ↓
+                         comparison.py
+                                 │
+                         RMSE + 曲率比较
