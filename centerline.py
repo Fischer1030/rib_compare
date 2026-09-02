@@ -1339,3 +1339,342 @@ def extract_centerline(
     )
 
     return line
+
+import numpy as np
+import trimesh
+
+
+# ============================================================
+# 中心线长度
+# ============================================================
+
+def centerline_length(points):
+
+    points = np.asarray(
+        points,
+        dtype=np.float64
+    )
+
+    if len(points) < 2:
+        return 0.0
+
+    return float(
+        np.sum(
+            np.linalg.norm(
+                np.diff(points, axis=0),
+                axis=1
+            )
+        )
+    )
+
+def extract_subregion_centerline(
+    full_centerline,
+    subregion_mesh,
+    n_points=120,
+    distance_threshold=10.0
+):
+    """
+    根据 A2 模型与完整中心线之间的空间距离，
+    从完整中心线中截取 A2 对应的中心线。
+
+    核心逻辑：
+
+        完整 A
+            ↓
+        完整 A 中心线
+            ↓
+        A2 模型
+            ↓
+        计算 A2 顶点到完整中心线的最近距离
+            ↓
+        找到与 A2 对应的中心线区段
+            ↓
+        截取
+            ↓
+        A2 中心线
+
+    注意：
+        不再对 A2 进行 skeletonize。
+        不依赖 A2.bounds 完全覆盖中心线。
+    """
+
+    full_centerline = np.asarray(
+        full_centerline,
+        dtype=np.float64
+    )
+
+    if len(full_centerline) < 2:
+
+        raise ValueError(
+            "完整中心线点数不足。"
+        )
+
+    if not isinstance(
+        subregion_mesh,
+        trimesh.Trimesh
+    ):
+
+        raise TypeError(
+            "subregion_mesh 必须是 trimesh.Trimesh"
+        )
+
+    print()
+    print("=" * 70)
+    print("从完整中心线截取 A2 中心线")
+    print("=" * 70)
+
+    print(
+        f"完整中心线点数："
+        f"{len(full_centerline)}"
+    )
+
+    print(
+        f"完整中心线长度："
+        f"{centerline_length(full_centerline):.2f} mm"
+    )
+
+    print()
+    print("A2 bounds：")
+    print(subregion_mesh.bounds)
+
+    # ========================================================
+    # 1. A2 顶点
+    # ========================================================
+
+    a2_vertices = np.asarray(
+        subregion_mesh.vertices,
+        dtype=np.float64
+    )
+
+    if len(a2_vertices) == 0:
+
+        raise RuntimeError(
+            "A2 没有有效顶点。"
+        )
+
+    # ========================================================
+    # 2. 建立完整中心线 KDTree
+    # ========================================================
+
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(
+        full_centerline
+    )
+
+    # ========================================================
+    # 3. A2 顶点 → 完整中心线
+    #
+    # 对每一个 A2 顶点，
+    # 找它距离完整中心线最近的点。
+    # ========================================================
+
+    distances, indices = tree.query(
+        a2_vertices,
+        k=1
+    )
+
+    distances = np.asarray(
+        distances,
+        dtype=np.float64
+    )
+
+    indices = np.asarray(
+        indices,
+        dtype=np.int64
+    )
+
+    print()
+    print("A2 → 完整中心线距离统计：")
+
+    print(
+        f"最小距离："
+        f"{np.min(distances):.3f} mm"
+    )
+
+    print(
+        f"最大距离："
+        f"{np.max(distances):.3f} mm"
+    )
+
+    print(
+        f"平均距离："
+        f"{np.mean(distances):.3f} mm"
+    )
+
+    print(
+        f"中位数："
+        f"{np.median(distances):.3f} mm"
+    )
+
+    # ========================================================
+    # 4. 找到 A2 附近的完整中心线索引
+    # ========================================================
+
+    close_mask = (
+        distances
+        <=
+        distance_threshold
+    )
+
+    close_indices = indices[
+        close_mask
+    ]
+
+    print()
+    print(
+        f"距离 {distance_threshold:.2f} mm "
+        f"以内的 A2 顶点："
+        f"{np.count_nonzero(close_mask):,}"
+    )
+
+    if len(close_indices) == 0:
+
+        raise RuntimeError(
+            "\n"
+            "A2 与完整中心线没有找到空间对应关系。\n"
+            "\n"
+            f"当前距离阈值："
+            f"{distance_threshold:.2f} mm\n"
+            f"A2 → 完整中心线最小距离："
+            f"{np.min(distances):.3f} mm\n"
+            "\n"
+            "请重点检查：\n"
+            "1. 完整A中心线是否仍处于患者A坐标系\n"
+            "2. A2是否与patient_A处于同一坐标系\n"
+            "3. 完整中心线提取是否正确\n"
+        )
+
+    # ========================================================
+    # 5. A2对应的中心线索引
+    # ========================================================
+
+    min_index = int(
+        np.min(close_indices)
+    )
+
+    max_index = int(
+        np.max(close_indices)
+    )
+
+    print()
+    print(
+        f"A2对应完整中心线索引范围："
+        f"{min_index} ~ {max_index}"
+    )
+
+    # ========================================================
+    # 6. 增加一点边界缓冲
+    #
+    # A2模型边缘与中心线对应位置之间可能存在
+    # 一定误差，因此前后各扩几个点。
+    # ========================================================
+
+    index_margin = 3
+
+    start_index = max(
+        0,
+        min_index - index_margin
+    )
+
+    end_index = min(
+        len(full_centerline) - 1,
+        max_index + index_margin
+    )
+
+    selected = full_centerline[
+        start_index:
+        end_index + 1
+    ]
+
+    print()
+    print(
+        f"截取后的完整中心线点数："
+        f"{len(selected)}"
+    )
+
+    if len(selected) < 2:
+
+        raise RuntimeError(
+            "A2对应中心线区段点数不足。"
+        )
+
+    # ========================================================
+    # 7. 弧长重采样
+    # ========================================================
+
+    segment_lengths = np.linalg.norm(
+        np.diff(
+            selected,
+            axis=0
+        ),
+        axis=1
+    )
+
+    cumulative = np.concatenate(
+        [
+            [0.0],
+            np.cumsum(
+                segment_lengths
+            )
+        ]
+    )
+
+    total_length = cumulative[-1]
+
+    if total_length <= 0:
+
+        raise RuntimeError(
+            "截取后的 A2 中心线长度无效。"
+        )
+
+    target = np.linspace(
+        0.0,
+        total_length,
+        n_points
+    )
+
+    centerline = np.column_stack(
+        [
+            np.interp(
+                target,
+                cumulative,
+                selected[:, axis]
+            )
+            for axis in range(3)
+        ]
+    )
+
+    # ========================================================
+    # 8. 输出
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("A2中心线生成完成")
+    print("=" * 70)
+
+    print(
+        f"A2中心线长度："
+        f"{centerline_length(centerline):.2f} mm"
+    )
+
+    print(
+        f"中心线点数："
+        f"{len(centerline)}"
+    )
+
+    print()
+    print("A2中心线端点：")
+
+    print(
+        "起点：",
+        centerline[0]
+    )
+
+    print(
+        "终点：",
+        centerline[-1]
+    )
+
+    return centerline

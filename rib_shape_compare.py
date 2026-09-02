@@ -21,7 +21,8 @@ from resection import (
 )
 
 from centerline import (
-    extract_centerline
+    extract_centerline,
+    extract_subregion_centerline
 )
 
 from comparison import (
@@ -468,14 +469,80 @@ def main():
     print("提取 A2 中心线")
     print("=" * 70)
 
-    A2_centerline = extract_centerline(
+    # ========================================================
+    # 4. 完整 A 中心线
+    # ========================================================
 
-        A2,
+    print()
+    print("=" * 70)
+    print("提取完整 A 中心线")
+    print("=" * 70)
+
+    reference_centerline = extract_centerline(
+
+        registered_B,
 
         voxel_size=config.VOXEL_SIZE,
 
         n_points=config.CENTERLINE_POINTS
 
+    )
+
+    reference_length = centerline_length(
+        reference_centerline
+    )
+
+    print(
+        f"完整 A 中心线长度："
+        f"{reference_length:.2f} mm"
+    )
+    print()
+    print("=" * 70)
+    print("完整 A / A2 / 完整中心线坐标检查")
+    print("=" * 70)
+
+    print("registered_B bounds:")
+    print(registered_B.bounds)
+
+    print()
+
+    print("A2 bounds:")
+    print(A2.bounds)
+
+    print()
+
+    print("完整中心线 bounds:")
+    print([
+        np.min(reference_centerline, axis=0),
+        np.max(reference_centerline, axis=0)
+    ])
+    print()
+    print("完整中心线端点：")
+    print("start:", reference_centerline[0])
+    print("end  :", reference_centerline[-1])
+    # ========================================================
+    # 5. 从完整 A 中心线截取 A2
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("从完整 A 中心线截取 A2 中心线")
+    print("=" * 70)
+
+    A2_centerline = extract_subregion_centerline(
+        reference_centerline,
+        A2,
+        n_points=config.CENTERLINE_POINTS,
+        distance_threshold=10.0
+    )
+
+    A2_length = centerline_length(
+        A2_centerline
+    )
+
+    print(
+        f"A2中心线长度："
+        f"{A2_length:.2f} mm"
     )
 
     A2_length = centerline_length(
