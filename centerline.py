@@ -1,6 +1,7 @@
 import numpy as np
 import trimesh
 import networkx as nx
+from scipy.interpolate import make_splprep
 
 from scipy.ndimage import binary_fill_holes
 from scipy.signal import savgol_filter
@@ -25,111 +26,142 @@ def voxelize_mesh(
     transform = vox.transform
 
     return volume, transform
-
-
-# ============================================================
-# 3D Skeleton
-# ============================================================
-
-def skeleton_3d(
-        volume
-):
-
-    volume = binary_fill_holes(
-        volume
-    )
+def prepare_volume(volume):
+    """
+    患者肋骨 Skeletonize 前的体素实体化处理。
+    """
 
     from scipy import ndimage
 
     print()
     print("-" * 60)
-    print("Skeletonize 前体素连通性检查")
+    print("准备 Skeletonize 体素模型")
     print("-" * 60)
 
-    voxel_labels, voxel_components = ndimage.label(
+    # --------------------------------------------------------
+    # 1. 最大体素连通组件
+    # --------------------------------------------------------
+
+    labels, num_components = ndimage.label(
         volume,
         structure=ndimage.generate_binary_structure(3, 3)
     )
 
-    component_sizes = np.bincount(
-        voxel_labels.ravel()
-    )[1:]
+    if num_components > 1:
 
-    component_sizes = np.sort(
-        component_sizes
-    )[::-1]
-
-    print(
-        f"体素总数：{int(np.sum(volume)):,}"
-    )
-
-    print(
-        f"体素连通组件：{voxel_components}"
-    )
-
-    print(
-        "最大组件体素数：",
-        component_sizes[0]
-        if len(component_sizes) > 0
-        else 0
-    )
-
-    print(
-        "前10个组件：",
-        component_sizes[:10]
-    )
-
-    # --------------------------------------------------------
-    # 如果体素模型存在多个组件
-    # 保留最大组件
-    # --------------------------------------------------------
-
-    if voxel_components > 1:
+        sizes = np.bincount(
+            labels.ravel()
+        )[1:]
 
         largest_label = (
-            np.argmax(
-                component_sizes
-            ) + 1
+            np.argmax(sizes) + 1
         )
 
         volume = (
-            voxel_labels == largest_label
+            labels == largest_label
         )
 
         print(
-            f"Skeletonize前已保留最大体素组件："
+            f"保留最大体素组件："
             f"{int(np.sum(volume)):,} voxels"
         )
 
     # --------------------------------------------------------
-    # Skeletonize
+    # 2. 填充内部空腔
     # --------------------------------------------------------
 
-    print()
-    print("正在进行 3D Skeletonize...")
-
-    skeleton = skeletonize(
+    volume = binary_fill_holes(
         volume
     )
 
-    # --------------------------------------------------------
-    # Skeleton 连通性
-    # --------------------------------------------------------
-
-    structure = ndimage.generate_binary_structure(
-        3,
-        3
+    print(
+        f"第一次填充后体素数："
+        f"{int(np.sum(volume)):,}"
     )
 
-    labels, num_components = ndimage.label(
-        skeleton,
-        structure=structure
+    return volume
+
+def crop_volume(
+        volume,
+        padding=3
+):
+    """
+    裁剪体素模型，并返回 crop_origin。
+    """
+
+    coords = np.argwhere(volume)
+
+    if len(coords) == 0:
+        raise RuntimeError(
+            "体素模型为空，无法裁剪。"
+        )
+
+    min_coord = coords.min(axis=0)
+    max_coord = coords.max(axis=0)
+
+    crop_min = np.maximum(
+        min_coord - padding,
+        0
+    )
+
+    crop_max = np.minimum(
+        max_coord + padding + 1,
+        volume.shape
+    )
+
+    cropped = volume[
+        crop_min[0]:crop_max[0],
+        crop_min[1]:crop_max[1],
+        crop_min[2]:crop_max[2]
+    ]
+
+    crop_origin = np.asarray(
+        crop_min,
+        dtype=np.int64
     )
 
     print()
     print("-" * 60)
-    print("Skeleton 连通性检查")
+    print("体素裁剪")
     print("-" * 60)
+
+    print(
+        f"原始体素尺寸："
+        f"{volume.shape}"
+    )
+
+    print(
+        f"裁剪后体素尺寸："
+        f"{cropped.shape}"
+    )
+
+    print(
+        f"crop_origin："
+        f"{crop_origin}"
+    )
+
+    return (
+        cropped,
+        crop_origin
+    )
+def skeleton_3d(volume):
+    """
+    对已经完成实体化和裁剪的体素模型进行3D Skeletonize。
+    """
+
+    from scipy import ndimage
+
+    print()
+    print("-" * 60)
+    print("正在进行 3D Skeletonize...")
+    print("-" * 60)
+
+    skeleton = skeletonize(volume)
+
+    labels, num_components = ndimage.label(
+        skeleton,
+        structure=ndimage.generate_binary_structure(3, 3)
+    )
 
     print(
         f"Skeleton体素数量："
@@ -142,8 +174,7 @@ def skeleton_3d(
     )
 
     # --------------------------------------------------------
-    # 如果 Skeleton 出现多个组件
-    # 保留最大 Skeleton
+    # 保留最大 Skeleton 连通组件
     # --------------------------------------------------------
 
     if num_components > 1:
@@ -153,9 +184,7 @@ def skeleton_3d(
         )[1:]
 
         largest_label = (
-            np.argmax(
-                sizes
-            ) + 1
+            np.argmax(sizes) + 1
         )
 
         skeleton = (
@@ -173,49 +202,77 @@ def skeleton_3d(
 
     return skeleton
 
-
-# ============================================================
-# Skeleton 坐标
-# ============================================================
-
-def skeleton_points(
-        skeleton,
+def path_voxel_to_world(
+        node_path,
+        coords,
+        crop_origin,
         transform
 ):
+    """
+    Skeleton longest path:
+        cropped voxel coordinates
+        →
+        original voxel coordinates
+        →
+        world coordinates
+    """
 
-    idx = np.argwhere(
-        skeleton
+    path_coords = coords[
+        node_path
+    ].astype(
+        np.float64
     )
 
-    points = []
+    # --------------------------------------------------------
+    # 恢复 crop 前坐标
+    # --------------------------------------------------------
 
-    for p in idx:
-
-        xyz = trimesh.transform_points(
-
-            np.array(
-                [
-                    p[::-1]
-                ]
-            ),
-
-            transform
-
-        )[0]
-
-        points.append(
-            xyz
-        )
-
-    return np.array(
-        points
+    path_coords += np.asarray(
+        crop_origin,
+        dtype=np.float64
     )
 
+    # --------------------------------------------------------
+    # voxel index:
+    # [z, y, x]
+    #
+    # trimesh:
+    # [x, y, z]
+    # --------------------------------------------------------
 
+    xyz = path_coords[:, ::1]
+
+    world_coords = trimesh.transform_points(
+        xyz,
+        transform
+    )
+
+    return world_coords
 # ============================================================
 # 建立 Skeleton 图
 # ============================================================
+def calculate_arc_length(points):
 
+    points = np.asarray(
+        points,
+        dtype=np.float64
+    )
+
+    if len(points) < 2:
+        return np.zeros(
+            len(points),
+            dtype=np.float64
+        )
+
+    segment_lengths = np.linalg.norm(
+        np.diff(points, axis=0),
+        axis=1
+    )
+
+    return np.concatenate([
+        [0.0],
+        np.cumsum(segment_lengths)
+    ])
 def _build_skeleton_graph(
         skeleton,
         voxel_size
@@ -303,66 +360,6 @@ def _build_skeleton_graph(
 
 
 # ============================================================
-# PCA 主轴
-# ============================================================
-
-def _calculate_pca_axis(
-        coords
-):
-
-    if len(coords) < 3:
-
-        raise RuntimeError(
-            "Skeleton节点数量不足，无法进行PCA。"
-        )
-
-    center = np.mean(
-        coords,
-        axis=0
-    )
-
-    centered = (
-        coords
-        -
-        center
-    )
-
-    covariance = np.cov(
-        centered,
-        rowvar=False
-    )
-
-    eigenvalues, eigenvectors = np.linalg.eigh(
-        covariance
-    )
-
-    order = np.argsort(
-        eigenvalues
-    )[::-1]
-
-    eigenvalues = eigenvalues[
-        order
-    ]
-
-    eigenvectors = eigenvectors[
-        :,
-        order
-    ]
-
-    axis = eigenvectors[:, 0]
-
-    axis = axis / np.linalg.norm(
-        axis
-    )
-
-    return (
-        center,
-        axis,
-        eigenvalues
-    )
-
-
-# ============================================================
 # Skeleton 拓扑诊断
 # ============================================================
 
@@ -447,294 +444,65 @@ def _diagnose_skeleton_graph(
 # 根据 PCA 确定两个端部候选节点
 # ============================================================
 
-def _find_end_candidates(
-        G,
-        coords,
-        axis,
-        center
-):
-
-    # --------------------------------------------------------
-    # 将所有 Skeleton 节点投影到 PCA 主轴
-    # --------------------------------------------------------
-
-    centered = (
-        coords
-        -
-        center
-    )
-
-    projection = (
-        centered
-        @
-        axis
-    )
-
-    min_projection = np.min(
-        projection
-    )
-
-    max_projection = np.max(
-        projection
-    )
-
-    total_range = (
-        max_projection
-        -
-        min_projection
-    )
-
-    if total_range <= 0:
-
-        raise RuntimeError(
-            "Skeleton PCA主轴长度为0。"
-        )
-
-    # --------------------------------------------------------
-    # 端部区域
-    #
-    # 默认取主轴两端 10%
-    # --------------------------------------------------------
-
-    end_fraction = 0.10
-
-    low_limit = (
-        min_projection
-        +
-        total_range
-        *
-        end_fraction
-    )
-
-    high_limit = (
-        max_projection
-        -
-        total_range
-        *
-        end_fraction
-    )
-
-    low_candidates = np.where(
-        projection <= low_limit
-    )[0]
-
-    high_candidates = np.where(
-        projection >= high_limit
-    )[0]
-
-    # --------------------------------------------------------
-    # 如果候选太少
-    # 放宽到15%
-    # --------------------------------------------------------
-
-    if len(low_candidates) == 0:
-
-        low_limit = (
-            min_projection
-            +
-            total_range
-            *
-            0.15
-        )
-
-        low_candidates = np.where(
-            projection <= low_limit
-        )[0]
-
-    if len(high_candidates) == 0:
-
-        high_limit = (
-            max_projection
-            -
-            total_range
-            *
-            0.15
-        )
-
-        high_candidates = np.where(
-            projection >= high_limit
-        )[0]
-
-    # --------------------------------------------------------
-    # 优先选择真正的 Skeleton endpoint
-    # --------------------------------------------------------
-
-    endpoints = [
-        node
-        for node in G.nodes
-        if G.degree(node) == 1
-    ]
-
-    low_endpoints = [
-        node
-        for node in endpoints
-        if projection[node] <= low_limit
-    ]
-
-    high_endpoints = [
-        node
-        for node in endpoints
-        if projection[node] >= high_limit
-    ]
-
-    if len(low_endpoints) > 0:
-
-        low_candidates = np.array(
-            low_endpoints,
-            dtype=int
-        )
-
-    if len(high_endpoints) > 0:
-
-        high_candidates = np.array(
-            high_endpoints,
-            dtype=int
-        )
-
-    print()
-    print("-" * 60)
-    print("PCA端部候选节点")
-    print("-" * 60)
-
-    print(
-        f"PCA主轴范围："
-        f"{min_projection:.2f} ~ "
-        f"{max_projection:.2f} voxel"
-    )
-
-    print(
-        f"左端候选节点："
-        f"{len(low_candidates)}"
-    )
-
-    print(
-        f"右端候选节点："
-        f"{len(high_candidates)}"
-    )
-
-    return (
-        low_candidates,
-        high_candidates,
-        projection
-    )
-
-
 # ============================================================
 # 寻找 PCA 两端之间的最佳路径
 # ============================================================
-
-def _find_endpoint_to_endpoint_path(
+def _find_longest_endpoint_path(
         G,
-        coords,
-        low_candidates,
-        high_candidates,
-        projection,
-        voxel_size
+        endpoints
 ):
+    """
+    在 Skeleton 图中，
+    对所有 Skeleton endpoint 两两寻找路径，
+    返回真实空间长度最大的 endpoint-to-endpoint path。
+    """
 
-    if (
-        len(low_candidates) == 0
-        or
-        len(high_candidates) == 0
-    ):
-
+    if len(endpoints) < 2:
         raise RuntimeError(
-            "无法找到A2 Skeleton的两个端部候选区域。"
+            "Skeleton端点少于2个，无法提取中心线。"
         )
-
-    # --------------------------------------------------------
-    # 为了避免候选节点过多
-    # 分别选距离两端投影极值最近的若干节点
-    # --------------------------------------------------------
-
-    low_target = np.min(
-        projection
-    )
-
-    high_target = np.max(
-        projection
-    )
-
-    low_candidates = sorted(
-        low_candidates,
-        key=lambda i:
-        abs(
-            projection[i]
-            -
-            low_target
-        )
-    )[:20]
-
-    high_candidates = sorted(
-        high_candidates,
-        key=lambda i:
-        abs(
-            projection[i]
-            -
-            high_target
-        )
-    )[:20]
 
     print()
     print("-" * 60)
-    print("寻找 PCA 两端之间的中心路径")
+    print("寻找 Skeleton 端点之间的最长路径")
     print("-" * 60)
 
     best_path = None
-
-    best_length = np.inf
-
+    best_length = -np.inf
     best_pair = None
 
     tested_pairs = 0
 
     # --------------------------------------------------------
-    # 对候选端点进行 Dijkstra
-    #
-    # 注意：
-    # 这里使用“最短路径”，而不是全图最长路径。
-    #
-    # 目的：
-    # 避免 Skeleton 中存在回环时，
-    # 路径绕圈导致长度严重异常。
+    # endpoint 两两组合
     # --------------------------------------------------------
 
-    for start in low_candidates:
+    for i in range(len(endpoints)):
 
-        try:
+        start = endpoints[i]
 
-            distances, paths = (
-                nx.single_source_dijkstra(
-                    G,
-                    start,
-                    weight="weight"
-                )
-            )
+        distances, paths = nx.single_source_dijkstra(
+            G,
+            start,
+            weight="weight"
+        )
 
-        except Exception:
+        for j in range(i + 1, len(endpoints)):
 
-            continue
-
-        for end in high_candidates:
+            end = endpoints[j]
 
             if end not in distances:
                 continue
 
-            path = paths[end]
-
-            path_length = (
-                distances[end]
-            )
+            path_length = distances[end]
 
             tested_pairs += 1
 
-            if path_length < best_length:
+            if path_length > best_length:
 
-                best_length = (
-                    path_length
-                )
+                best_length = path_length
 
-                best_path = path
+                best_path = paths[end]
 
                 best_pair = (
                     start,
@@ -744,7 +512,7 @@ def _find_endpoint_to_endpoint_path(
     if best_path is None:
 
         raise RuntimeError(
-            "无法建立A2两端之间的Skeleton路径。"
+            "无法找到 Skeleton 端点之间的有效路径。"
         )
 
     print(
@@ -753,32 +521,32 @@ def _find_endpoint_to_endpoint_path(
     )
 
     print(
-        f"最终路径节点："
+        f"最长路径节点数："
         f"{len(best_path)}"
     )
 
     print(
-        f"Skeleton端到端路径长度："
+        f"最长路径长度："
         f"{best_length:.2f} mm"
     )
 
     print(
-        f"起点投影："
-        f"{projection[best_pair[0]]:.2f}"
+        f"起点节点："
+        f"{best_pair[0]}"
     )
 
     print(
-        f"终点投影："
-        f"{projection[best_pair[1]]:.2f}"
+        f"终点节点："
+        f"{best_pair[1]}"
     )
 
-    return np.array(
+    return np.asarray(
         best_path,
-        dtype=int
+        dtype=np.int64
     )
-
 
 # ============================================================
+
 # 最佳路径
 #
 # 保持原函数名称和参数完全不变
@@ -840,96 +608,16 @@ def longest_path(
         )
     )
 
-    # ========================================================
-    # PCA
-    # ========================================================
-
-    center, axis, eigenvalues = (
-        _calculate_pca_axis(
-            coords
-        )
-    )
-
-    print()
-    print("-" * 60)
-    print("Skeleton PCA 主轴")
-    print("-" * 60)
-
-    print(
-        f"PCA中心："
-        f"{center}"
-    )
-
-    print(
-        f"PCA主轴："
-        f"{axis}"
-    )
-
-    print(
-        f"PCA特征值："
-        f"{eigenvalues}"
-    )
-
-    if (
-        eigenvalues[0]
-        >
-        0
-    ):
-
-        linearity = (
-            eigenvalues[0]
-            /
-            (
-                eigenvalues[1]
-                +
-                eigenvalues[2]
-                +
-                1e-12
-            )
-        )
-
-    else:
-
-        linearity = 0
-
-    print(
-        f"PCA主轴线性度："
-        f"{linearity:.3f}"
-    )
-
-    # ========================================================
-    # 确定两端候选区域
-    # ========================================================
-
-    (
-        low_candidates,
-        high_candidates,
-        projection
-    ) = _find_end_candidates(
-
-        G,
-        coords,
-        axis,
-        center
-
-    )
 
     # ========================================================
     # 找到两端之间的中心路径
     # ========================================================
 
     node_path = (
-        _find_endpoint_to_endpoint_path(
+        _find_longest_endpoint_path(
 
             G,
-            coords,
-
-            low_candidates,
-            high_candidates,
-
-            projection,
-
-            voxel_size
+            coords
 
         )
     )
@@ -1055,7 +743,7 @@ def smooth_centerline(
 
 def resample_centerline(
         line,
-        n_points=300
+        n_points=120
 ):
 
     if len(line) < 2:
@@ -1196,154 +884,207 @@ def resample_centerline(
 #
 # 接口保持完全不变
 # ============================================================
-
 def extract_centerline(
         mesh,
         voxel_size=0.5,
-        n_points=300
+        n_points=120
 ):
 
     print()
     print("=" * 70)
-    print("开始提取中心线")
+    print("开始提取患者完整肋骨中心线")
     print("=" * 70)
 
     # ========================================================
-    # 体素化
+    # 1. 体素化
     # ========================================================
 
-    volume, transform = (
-        voxelize_mesh(
-
-            mesh,
-
-            voxel_size
-
-        )
+    volume, transform = voxelize_mesh(
+        mesh,
+        voxel_size
     )
 
     print(
-        f"体素矩阵："
+        f"原始体素矩阵："
         f"{volume.shape}"
     )
 
     print(
-        f"实心体素数量："
+        f"原始体素数量："
         f"{int(np.sum(volume)):,}"
     )
 
     # ========================================================
-    # Skeleton
+    # 2. 体素实体化
     # ========================================================
 
-    skeleton = (
-        skeleton_3d(
-            volume
+    volume = prepare_volume(
+        volume
+    )
+
+    # ========================================================
+    # 3. 裁剪
+    # ========================================================
+
+    cropped_volume, crop_origin = (
+        crop_volume(
+            volume,
+            padding=3
         )
     )
 
     # ========================================================
-    # Skeleton节点
+    # 4. 3D Skeleton
     # ========================================================
 
-    pts = (
-        skeleton_points(
+    skeleton = skeleton_3d(
+        cropped_volume
+    )
 
-            skeleton,
+    # ========================================================
+    # 5. 建立 26 邻域图
+    # ========================================================
 
-            transform
+    G, coords = _build_skeleton_graph(
+        skeleton,
+        voxel_size
+    )
 
+    # ========================================================
+    # 6. Skeleton 拓扑诊断
+    # ========================================================
+
+    endpoints, branch_points = (
+        _diagnose_skeleton_graph(
+            G
         )
     )
 
+    if len(endpoints) < 2:
+
+        raise RuntimeError(
+            "Skeleton有效端点少于2个。"
+        )
+
+    # ========================================================
+    # 7. 所有 endpoint 之间寻找最长路径
+    # ========================================================
+
+    node_path = (
+        _find_longest_endpoint_path(
+            G,
+            endpoints
+        )
+    )
+
+    # ========================================================
+    # 8. Skeleton path
+    #    → 世界坐标
+    # ========================================================
+
+    line = path_voxel_to_world(
+        node_path,
+        coords,
+        crop_origin,
+        transform
+    )
+
+    # ========================================================
+    # 9. 原始真实空间弧长
+    # ========================================================
+
+    arc_length = calculate_arc_length(
+        line
+    )
+
+    raw_length = (
+        arc_length[-1]
+        if len(arc_length) > 0
+        else 0.0
+    )
+
+    print()
     print(
-        f"Skeleton世界坐标点数："
-        f"{len(pts)}"
+        f"最长Skeleton中心线长度："
+        f"{raw_length:.2f} mm"
     )
 
     # ========================================================
-    # 核心：
-    # PCA + 两端约束 + Skeleton路径
-    # ========================================================
-
-    line = (
-        longest_path(
-
-            skeleton,
-
-            voxel_size,
-
-            transform
-
-        )
-    )
-
-    # ========================================================
-    # 平滑
+    # 10. 轻度 SG 平滑
     # ========================================================
 
     print()
     print(
-        "进行中心线轻度平滑..."
+        "进行轻度 Savitzky-Golay 平滑..."
     )
 
-    line = (
-        smooth_centerline(
+    line = smooth_centerline(
+        line,
+        window=9,
+    )
+
+    # ========================================================
+    # 11. 平滑后重新计算真实弧长
+    # ========================================================
+
+    smoothed_arc_length = (
+        calculate_arc_length(
             line
         )
     )
 
-    # ========================================================
-    # 重采样
-    # ========================================================
+    smoothed_length = (
+        smoothed_arc_length[-1]
+        if len(smoothed_arc_length) > 0
+        else 0.0
+    )
 
-    line = (
-        resample_centerline(
-
-            line,
-
-            n_points
-
-        )
+    print(
+        f"平滑后中心线长度："
+        f"{smoothed_length:.2f} mm"
     )
 
     # ========================================================
-    # 最终长度
+    # 12. 按真实弧长重新采样
     # ========================================================
 
-    if len(line) >= 2:
+    line = resample_centerline(
+        line,
+        n_points
+    )
 
-        final_length = np.sum(
-            np.linalg.norm(
-                np.diff(
-                    line,
-                    axis=0
-                ),
-                axis=1
-            )
+    # ========================================================
+    # 13. 最终长度
+    # ========================================================
+
+    final_arc_length = (
+        calculate_arc_length(
+            line
         )
+    )
 
-    else:
-
-        final_length = 0
+    final_length = (
+        final_arc_length[-1]
+        if len(final_arc_length) > 0
+        else 0.0
+    )
 
     print()
+    print("=" * 70)
+    print("患者完整肋骨中心线生成完成")
+    print("=" * 70)
+
     print(
-        f"中心线最终长度："
+        f"最终中心线长度："
         f"{final_length:.2f} mm"
     )
 
     print(
-        f"中心线点数："
+        f"最终中心线点数："
         f"{len(line)}"
     )
 
     return line
-
-import numpy as np
-import trimesh
-
-
 # ============================================================
 # 中心线长度
 # ============================================================
@@ -1366,37 +1107,42 @@ def centerline_length(points):
             )
         )
     )
-
 def extract_subregion_centerline(
-    full_centerline,
-    subregion_mesh,
-    n_points=120,
-    distance_threshold=10.0
+        full_centerline,
+        subregion_mesh,
+        n_points=120,
+        distance_threshold=8.0,
+        smooth_sigma=2.0,
+        min_segment_points=8
 ):
     """
-    根据 A2 模型与完整中心线之间的空间距离，
-    从完整中心线中截取 A2 对应的中心线。
+    从完整肋骨中心线中截取 A2 对应的中心线。
 
-    核心逻辑：
-
-        完整 A
+    方法：
+        完整中心线
             ↓
-        完整 A 中心线
+        计算每个中心线点到 A2 表面的最近距离
             ↓
-        A2 模型
+        对距离曲线进行平滑
             ↓
-        计算 A2 顶点到完整中心线的最近距离
+        找到连续的低距离区域
             ↓
-        找到与 A2 对应的中心线区段
+        截取对应中心线
             ↓
-        截取
-            ↓
-        A2 中心线
+        弧长重采样
 
     注意：
-        不再对 A2 进行 skeletonize。
-        不依赖 A2.bounds 完全覆盖中心线。
+        不要求 A2 watertight。
+        不对 A2 skeletonize。
     """
+
+    import numpy as np
+    import trimesh
+    from scipy.ndimage import gaussian_filter1d
+
+    # ========================================================
+    # 0. 输入检查
+    # ========================================================
 
     full_centerline = np.asarray(
         full_centerline,
@@ -1404,7 +1150,6 @@ def extract_subregion_centerline(
     )
 
     if len(full_centerline) < 2:
-
         raise ValueError(
             "完整中心线点数不足。"
         )
@@ -1413,7 +1158,6 @@ def extract_subregion_centerline(
         subregion_mesh,
         trimesh.Trimesh
     ):
-
         raise TypeError(
             "subregion_mesh 必须是 trimesh.Trimesh"
         )
@@ -1424,8 +1168,7 @@ def extract_subregion_centerline(
     print("=" * 70)
 
     print(
-        f"完整中心线点数："
-        f"{len(full_centerline)}"
+        f"完整中心线点数：{len(full_centerline)}"
     )
 
     print(
@@ -1437,55 +1180,57 @@ def extract_subregion_centerline(
     print("A2 bounds：")
     print(subregion_mesh.bounds)
 
-    # ========================================================
-    # 1. A2 顶点
-    # ========================================================
-
-    a2_vertices = np.asarray(
-        subregion_mesh.vertices,
-        dtype=np.float64
+    print(
+        f"A2 watertight："
+        f"{subregion_mesh.is_watertight}"
     )
 
-    if len(a2_vertices) == 0:
+    # ========================================================
+    # 1. 检查 A2
+    # ========================================================
 
+    if len(subregion_mesh.vertices) == 0:
         raise RuntimeError(
             "A2 没有有效顶点。"
         )
 
     # ========================================================
-    # 2. 建立完整中心线 KDTree
-    # ========================================================
-
-    from scipy.spatial import cKDTree
-
-    tree = cKDTree(
-        full_centerline
-    )
-
-    # ========================================================
-    # 3. A2 顶点 → 完整中心线
+    # 2. 完整中心线 → A2 网格最近距离
     #
-    # 对每一个 A2 顶点，
-    # 找它距离完整中心线最近的点。
+    # 不使用 contains()
+    # 不要求 watertight
     # ========================================================
 
-    distances, indices = tree.query(
-        a2_vertices,
-        k=1
+    print()
+    print(
+        "正在计算完整中心线 → A2 表面距离..."
     )
+
+    try:
+
+        closest_points, distances, triangle_id = (
+            trimesh.proximity.closest_point(
+                subregion_mesh,
+                full_centerline
+            )
+        )
+
+    except Exception as e:
+
+        raise RuntimeError(
+            "计算中心线到 A2 表面距离失败。\n"
+            f"错误：{e}"
+        )
 
     distances = np.asarray(
         distances,
         dtype=np.float64
     )
 
-    indices = np.asarray(
-        indices,
-        dtype=np.int64
-    )
-
     print()
-    print("A2 → 完整中心线距离统计：")
+    print(
+        "完整中心线 → A2 距离统计："
+    )
 
     print(
         f"最小距离："
@@ -1508,78 +1253,239 @@ def extract_subregion_centerline(
     )
 
     # ========================================================
-    # 4. 找到 A2 附近的完整中心线索引
+    # 3. 输出距离曲线的关键数据
+    # ========================================================
+
+    print()
+    print(
+        "中心线距离序列："
+    )
+
+    for i in range(
+        0,
+        len(distances),
+        max(1, len(distances) // 20)
+    ):
+
+        print(
+            f"index={i:3d}  "
+            f"distance={distances[i]:8.3f} mm"
+        )
+
+    # ========================================================
+    # 4. 平滑距离曲线
+    # ========================================================
+
+    smooth_distances = gaussian_filter1d(
+        distances,
+        sigma=smooth_sigma
+    )
+
+    # ========================================================
+    # 5. 根据阈值寻找 A2 对应区域
     # ========================================================
 
     close_mask = (
-        distances
+        smooth_distances
         <=
         distance_threshold
     )
 
-    close_indices = indices[
-        close_mask
-    ]
+    print()
+    print(
+        f"距离阈值："
+        f"{distance_threshold:.2f} mm"
+    )
+
+    print(
+        f"满足距离阈值的中心线点："
+        f"{np.count_nonzero(close_mask)}"
+    )
+
+    # ========================================================
+    # 6. 寻找连续区段
+    # ========================================================
+
+    segments = []
+
+    start = None
+
+    for i, flag in enumerate(close_mask):
+
+        if flag and start is None:
+
+            start = i
+
+        elif (
+            not flag
+            and start is not None
+        ):
+
+            end = i - 1
+
+            if (
+                end - start + 1
+                >= min_segment_points
+            ):
+
+                segments.append(
+                    (start, end)
+                )
+
+            start = None
+
+    # 处理最后一个区段
+    if start is not None:
+
+        end = len(close_mask) - 1
+
+        if (
+            end - start + 1
+            >= min_segment_points
+        ):
+
+            segments.append(
+                (start, end)
+            )
+
+    # ========================================================
+    # 7. 输出所有候选区段
+    # ========================================================
 
     print()
     print(
-        f"距离 {distance_threshold:.2f} mm "
-        f"以内的 A2 顶点："
-        f"{np.count_nonzero(close_mask):,}"
+        "检测到的连续候选区段："
     )
 
-    if len(close_indices) == 0:
+    if len(segments) == 0:
 
         raise RuntimeError(
             "\n"
-            "A2 与完整中心线没有找到空间对应关系。\n"
+            "没有找到连续的 A2 对应中心线区域。\n"
             "\n"
             f"当前距离阈值："
             f"{distance_threshold:.2f} mm\n"
-            f"A2 → 完整中心线最小距离："
+            f"最小距离："
             f"{np.min(distances):.3f} mm\n"
             "\n"
-            "请重点检查：\n"
-            "1. 完整A中心线是否仍处于患者A坐标系\n"
-            "2. A2是否与patient_A处于同一坐标系\n"
-            "3. 完整中心线提取是否正确\n"
+            "建议尝试提高 distance_threshold。"
+        )
+
+    for start, end in segments:
+
+        segment_length = centerline_length(
+            full_centerline[
+                start:end + 1
+            ]
+        )
+
+        print(
+            f"  {start:3d} ~ {end:3d}   "
+            f"点数={end - start + 1:3d}   "
+            f"长度={segment_length:.2f} mm"
         )
 
     # ========================================================
-    # 5. A2对应的中心线索引
+    # 8. 选择最佳区段
+    #
+    # 不单纯选择最长区段。
+    #
+    # 使用：
+    #   区段长度
+    #   +
+    #   区段内部平均距离
+    #
+    # 综合判断。
     # ========================================================
 
-    min_index = int(
-        np.min(close_indices)
-    )
+    best_segment = None
+    best_score = -np.inf
 
-    max_index = int(
-        np.max(close_indices)
-    )
+    for start, end in segments:
+
+        segment_distances = smooth_distances[
+            start:end + 1
+        ]
+
+        segment_length = centerline_length(
+            full_centerline[
+                start:end + 1
+            ]
+        )
+
+        mean_distance = np.mean(
+            segment_distances
+        )
+
+        # 距离越小越好
+        distance_score = (
+            1.0 /
+            (
+                mean_distance
+                + 1e-6
+            )
+        )
+
+        # 长度适当加权
+        length_score = np.sqrt(
+            max(segment_length, 1.0)
+        )
+
+        score = (
+            distance_score
+            *
+            length_score
+        )
+
+        if score > best_score:
+
+            best_score = score
+            best_segment = (
+                start,
+                end
+            )
+
+    best_start, best_end = best_segment
 
     print()
     print(
-        f"A2对应完整中心线索引范围："
-        f"{min_index} ~ {max_index}"
+        "选择的 A2 主体中心线区域："
+    )
+
+    print(
+        f"索引："
+        f"{best_start} ~ {best_end}"
+    )
+
+    print(
+        f"点数："
+        f"{best_end - best_start + 1}"
+    )
+
+    print(
+        f"区域长度："
+        f"{centerline_length(full_centerline[best_start:best_end + 1]):.2f} mm"
+    )
+
+    print(
+        f"区域平均距离："
+        f"{np.mean(smooth_distances[best_start:best_end + 1]):.3f} mm"
     )
 
     # ========================================================
-    # 6. 增加一点边界缓冲
-    #
-    # A2模型边缘与中心线对应位置之间可能存在
-    # 一定误差，因此前后各扩几个点。
+    # 9. 边界缓冲
     # ========================================================
 
-    index_margin = 3
+    index_margin = 2
 
     start_index = max(
         0,
-        min_index - index_margin
+        best_start - index_margin
     )
 
     end_index = min(
         len(full_centerline) - 1,
-        max_index + index_margin
+        best_end + index_margin
     )
 
     selected = full_centerline[
@@ -1589,18 +1495,17 @@ def extract_subregion_centerline(
 
     print()
     print(
-        f"截取后的完整中心线点数："
+        f"最终截取索引："
+        f"{start_index} ~ {end_index}"
+    )
+
+    print(
+        f"截取点数："
         f"{len(selected)}"
     )
 
-    if len(selected) < 2:
-
-        raise RuntimeError(
-            "A2对应中心线区段点数不足。"
-        )
-
     # ========================================================
-    # 7. 弧长重采样
+    # 10. 弧长重采样
     # ========================================================
 
     segment_lengths = np.linalg.norm(
@@ -1646,7 +1551,7 @@ def extract_subregion_centerline(
     )
 
     # ========================================================
-    # 8. 输出
+    # 11. 输出结果
     # ========================================================
 
     print()
@@ -1678,3 +1583,202 @@ def extract_subregion_centerline(
     )
 
     return centerline
+
+def fit_and_visualize_centerline(
+        centerline,
+        output_path,
+        label="A2",
+        smoothing=0.0,
+        n_fit_points=300
+):
+    """
+    对离散中心线进行 B-spline 拟合，并将：
+    1. 原始中心线
+    2. B-spline 拟合曲线
+
+    绘制在同一张图中，用于验证拟合效果。
+
+    Parameters
+    ----------
+    centerline : (N, 3) ndarray
+        原始中心线点
+    output_path : str or Path
+        输出图片路径
+    label : str
+        中心线名称
+    smoothing : float
+        B-spline 平滑参数。
+        0 表示尽可能通过原始点。
+        数值越大，曲线越平滑。
+    n_fit_points : int
+        拟合曲线上重新采样的点数。
+    """
+
+    from pathlib import Path
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from scipy.interpolate import splprep, splev
+
+    centerline = np.asarray(
+        centerline,
+        dtype=np.float64
+    )
+
+    if centerline.ndim != 2 or centerline.shape[1] != 3:
+        raise ValueError(
+            f"centerline 应为 (N, 3)，实际为 {centerline.shape}"
+        )
+
+    if len(centerline) < 4:
+        raise ValueError(
+            "中心线点数太少，无法进行 B-spline 拟合"
+        )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # ------------------------------------------------------------
+    # 1. 按中心线弧长建立参数 t
+    # ------------------------------------------------------------
+
+    segment_lengths = np.linalg.norm(
+        np.diff(centerline, axis=0),
+        axis=1
+    )
+
+    cumulative = np.concatenate([
+        [0.0],
+        np.cumsum(segment_lengths)
+    ])
+
+    total_length = cumulative[-1]
+
+    if total_length <= 0:
+        raise ValueError("中心线长度为 0")
+
+    t = cumulative / total_length
+
+    # ------------------------------------------------------------
+    # 2. B-spline 拟合
+    # ------------------------------------------------------------
+
+    spline_params, u = make_splprep(
+        centerline.T,
+        u=t,
+        s=smoothing,
+        k=3
+    )
+
+    # ------------------------------------------------------------
+    # 3. 在拟合曲线上重新采样
+    # ------------------------------------------------------------
+
+    u_fit = np.linspace(
+        0.0,
+        1.0,
+        n_fit_points
+    )
+
+    fitted = spline_params(u_fit).T
+
+    # ------------------------------------------------------------
+    # 4. 计算拟合曲线长度
+    # ------------------------------------------------------------
+
+    fitted_length = np.sum(
+        np.linalg.norm(
+            np.diff(fitted, axis=0),
+            axis=1
+        )
+    )
+
+    # ------------------------------------------------------------
+    # 5. 计算原始点到拟合曲线的大致误差
+    # ------------------------------------------------------------
+
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(fitted)
+
+    distances, _ = tree.query(
+        centerline
+    )
+
+    rmse = np.sqrt(
+        np.mean(distances ** 2)
+    )
+
+    max_error = np.max(distances)
+
+    # ------------------------------------------------------------
+    # 6. 绘图
+    # ------------------------------------------------------------
+
+    fig = plt.figure(
+        figsize=(10, 8)
+    )
+
+    ax = fig.add_subplot(
+        111,
+        projection="3d"
+    )
+
+    # 原始中心线
+    ax.plot(
+        centerline[:, 0],
+        centerline[:, 1],
+        centerline[:, 2],
+        "o",
+        markersize=3,
+        alpha=0.5,
+        label=f"{label} Raw"
+    )
+
+    # B-spline
+    ax.plot(
+        fitted[:, 0],
+        fitted[:, 1],
+        fitted[:, 2],
+        linewidth=3,
+        label=f"{label} B-spline"
+    )
+
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_zlabel("Z (mm)")
+
+    ax.set_title(
+        f"{label} Centerline B-spline Fit\n"
+        f"Raw Length = {total_length:.2f} mm | "
+        f"Fit Length = {fitted_length:.2f} mm | "
+        f"RMSE = {rmse:.3f} mm"
+    )
+
+    ax.legend()
+
+    plt.tight_layout()
+
+    fig.savefig(
+        output_path,
+        dpi=300
+    )
+
+    plt.close(fig)
+
+    print()
+    print("=" * 70)
+    print(f"{label} B-spline 拟合结果")
+    print("=" * 70)
+    print(f"原始点数       ：{len(centerline)}")
+    print(f"拟合点数       ：{len(fitted)}")
+    print(f"原始中心线长度 ：{total_length:.2f} mm")
+    print(f"拟合曲线长度   ：{fitted_length:.2f} mm")
+    print(f"拟合 RMSE      ：{rmse:.3f} mm")
+    print(f"最大误差       ：{max_error:.3f} mm")
+    print(f"可视化         ：{output_path}")
+    print("=" * 70)
+
+    return fitted, spline_params

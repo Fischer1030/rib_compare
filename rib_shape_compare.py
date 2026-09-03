@@ -22,7 +22,7 @@ from resection import (
 
 from centerline import (
     extract_centerline,
-    extract_subregion_centerline
+    extract_subregion_centerline, fit_and_visualize_centerline
 )
 
 from comparison import (
@@ -487,6 +487,11 @@ def main():
         n_points=config.CENTERLINE_POINTS
 
     )
+    print("=" * 70)
+    print(
+        f"存储完整中心线可视化："
+    )
+    print("=" * 70)
 
     reference_length = centerline_length(
         reference_centerline
@@ -527,13 +532,45 @@ def main():
     print()
     print("=" * 70)
     print("从完整 A 中心线截取 A2 中心线")
-    print("=" * 70)
+
 
     A2_centerline = extract_subregion_centerline(
         reference_centerline,
         A2,
         n_points=config.CENTERLINE_POINTS,
-        distance_threshold=10.0
+        distance_threshold=5.0
+    )
+    print("=" * 70)
+    print(
+        f"存储A2中心线可视化："
+    )
+    print("=" * 70)
+    save_centerline_overlap(
+
+        reference_centerline,
+
+        A2_centerline,
+
+        config.REPORT_DIR /
+        "A2_centerline-----.png",
+
+        "reference",
+
+        "A2"
+
+    )
+    np.save(
+        config.REPORT_DIR / "A2_centerline.npy",
+        A2_centerline
+    )
+
+    fit_and_visualize_centerline(
+        A2_centerline,
+        config.REPORT_DIR /
+        "A2_centerline_bspline-.png",
+        label="A2",
+        smoothing=1.0,
+        n_fit_points=300
     )
 
     A2_length = centerline_length(
@@ -544,16 +581,9 @@ def main():
         f"A2中心线长度："
         f"{A2_length:.2f} mm"
     )
-
-    A2_length = centerline_length(
-        A2_centerline
+    raise RuntimeError(
+        "无法从患者肋骨文件名判断L/R侧。"
     )
-
-    print(
-        f"A2中心线长度："
-        f"{A2_length:.2f} mm"
-    )
-
     if A2_length > 270.0:
         raise RuntimeError(
             f"\n"
